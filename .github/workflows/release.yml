@@ -1,0 +1,28 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Committed bundles must match the source build
+        run: git diff --exit-code -- dist
+      - run: npm test
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum ppr-tool.mjs > ../SHA256SUMS)
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" dist/ppr-tool.mjs SHA256SUMS --title "ppr-tool $GITHUB_REF_NAME" --generate-notes
