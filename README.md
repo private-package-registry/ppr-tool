@@ -23,8 +23,8 @@ and verify it against `SHA256SUMS`:
 | Windows x64 | `ppr-tool-x86_64-pc-windows-msvc.exe` |
 
 ```sh
-curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.2.0/ppr-tool-x86_64-unknown-linux-musl
-curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.2.0/SHA256SUMS
+curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.0.1/ppr-tool-x86_64-unknown-linux-musl
+curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.0.1/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 install -m 0755 ppr-tool-x86_64-unknown-linux-musl /usr/local/bin/ppr-tool
 ```
