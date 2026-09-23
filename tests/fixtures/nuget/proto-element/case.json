@@ -1,0 +1,4 @@
+{
+  "kind": "server-error",
+  "note": "fast-xml-parser refuses __proto__"
+}

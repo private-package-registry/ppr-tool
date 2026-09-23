@@ -1,0 +1,4 @@
+{
+  "kind": "ok",
+  "note": "Attributes keep elements as objects; scalars stay strings"
+}

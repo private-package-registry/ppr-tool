@@ -1,0 +1,4 @@
+{
+  "kind": "ok",
+  "note": "inf and nan serialise as null"
+}

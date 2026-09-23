@@ -1,0 +1,22 @@
+{
+    "name": "demo/sdk",
+    "version": "1.2.3",
+    "type": "library",
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Demo\\Sdk\\": "src/"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "1.x-dev"
+        }
+    },
+    "license": [
+        "MIT"
+    ]
+}

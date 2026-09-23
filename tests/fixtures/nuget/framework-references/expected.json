@@ -1,0 +1,1 @@
+{"contentFiles":{"files":{"@_buildAction":"None","@_copyToOutput":"true","@_flatten":"false","@_include":"any/any/config.json"}},"frameworkReferences":{"group":{"@_targetFramework":"net8.0","frameworkReference":{"@_name":"Microsoft.AspNetCore.App"}}},"id":"Demo.Sdk","name":"Demo.Sdk","packageTypes":{"packageType":{"@_name":"Dependency"}},"version":"1.2.3"}

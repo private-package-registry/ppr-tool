@@ -1,0 +1,1 @@
+{"dependencies":{"group":[{"@_targetFramework":".NETStandard2.0","dependency":[{"@_id":"A","@_version":"1.0.0"},{"@_id":"B","@_include":"All","@_version":"[2.0.0, 3.0.0)"}]},{"@_targetFramework":"net8.0"},{"@_targetFramework":"net9.0","dependency":{"@_id":"C","@_version":"3.0.0"}}]},"id":"Demo.Sdk","name":"Demo.Sdk","version":"1.2.3"}

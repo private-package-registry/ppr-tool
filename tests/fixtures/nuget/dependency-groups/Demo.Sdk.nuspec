@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Demo.Sdk</id>
+    <version>1.2.3</version>
+    <dependencies>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="A" version="1.0.0" />
+        <dependency id="B" version="[2.0.0, 3.0.0)" include="All" />
+      </group>
+      <group targetFramework="net8.0" />
+      <group targetFramework="net9.0">
+        <dependency id="C" version="3.0.0" />
+      </group>
+    </dependencies>
+  </metadata>
+</package>

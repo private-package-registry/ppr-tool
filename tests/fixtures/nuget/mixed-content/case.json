@@ -1,0 +1,4 @@
+{
+  "kind": "ok",
+  "note": "Text around children is trimmed per run and joined"
+}

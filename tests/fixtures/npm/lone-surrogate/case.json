@@ -1,0 +1,4 @@
+{
+  "kind": "client-only-error",
+  "note": "JavaScript accepts lone surrogates; the tool rejects them"
+}

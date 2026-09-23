@@ -1,0 +1,18 @@
+[package]
+name = "demo"
+version = "1.2.3"
+
+[package.metadata.numbers]
+int = 42
+negative = -17
+hex = 0xff
+octal = 0o17
+binary = 0b101
+underscored = 1_000_000
+max_safe = 9007199254740991
+min_safe = -9007199254740991
+float = 3.14
+exponent = 6.02e23
+small = 1e-7
+whole_float = 2.0
+negative_zero = -0.0

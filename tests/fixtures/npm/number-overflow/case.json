@@ -1,0 +1,4 @@
+{
+  "kind": "client-only-error",
+  "note": "JavaScript turns 1e400 into Infinity (null); the tool rejects it"
+}

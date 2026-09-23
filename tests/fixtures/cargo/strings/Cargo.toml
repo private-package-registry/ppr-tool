@@ -1,0 +1,12 @@
+[package]
+name = "demo"
+version = "1.2.3"
+description = """
+Multi-line \
+  continued
+second line"""
+homepage = 'https://literal.example.com/\no-escape'
+documentation = '''
+raw
+  block'''
+readme = "unicode: \u00e9 \U0001F600 tab:\t"

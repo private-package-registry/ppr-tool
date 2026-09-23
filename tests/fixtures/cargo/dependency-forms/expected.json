@@ -1,0 +1,1 @@
+{"build-dependencies":{"cc":"1.0"},"dependencies":{"plain":"1","renamed":{"package":"real-name","version":"0.3"},"table":{"default-features":false,"optional":true,"version":"2"}},"name":"demo","package":{"name":"demo","version":"1.2.3"},"version":"1.2.3"}

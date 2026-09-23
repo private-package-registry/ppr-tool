@@ -1,0 +1,8 @@
+[package]
+name = "demo"
+version = "1.2.3"
+
+[features]
+default = ["std"]
+std = []
+full = ["std", "dep:serde", "serde?/derive"]

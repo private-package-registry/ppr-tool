@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Demo.Sdk</id>
+    <version>1.2.3</version>
+    <description><![CDATA[Hello <b>world</b> & "friends"]]></description>
+    <releaseNotes>  <![CDATA[ padded ]]>  <![CDATA[second]]></releaseNotes>
+    <summary><![CDATA[]]></summary>
+  </metadata>
+</package>

@@ -1,0 +1,1 @@
+{"name":"demo","package":{"description":"Multi-line continued\nsecond line","documentation":"raw\n  block","homepage":"https://literal.example.com/\\no-escape","name":"demo","readme":"unicode: é 😀 tab:\t","version":"1.2.3"},"version":"1.2.3"}

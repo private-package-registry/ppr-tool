@@ -1,0 +1,4 @@
+{
+  "kind": "ok",
+  "note": "Empty and whitespace-only elements become empty strings"
+}

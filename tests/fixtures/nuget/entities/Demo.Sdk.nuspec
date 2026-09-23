@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Demo.Sdk</id>
+    <version>1.2.3</version>
+    <description>&lt;tag&gt; &amp;amp; &quot;q&quot; &apos;s&apos; &#65; &#x42; &copy;</description>
+    <title attr="&lt;a&gt; &amp; &#65;">T</title>
+  </metadata>
+</package>

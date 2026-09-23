@@ -1,0 +1,4 @@
+{
+  "kind": "client-only-error",
+  "note": "The tool rejects TOML datetimes; cargo package never writes them"
+}

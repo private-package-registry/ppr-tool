@@ -1,0 +1,15 @@
+[package]
+name = "demo"
+version = "1.2.3"
+
+[[bin]]
+name = "one"
+path = "src/one.rs"
+
+[[bin]]
+name = "two"
+path = "src/two.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "ex"

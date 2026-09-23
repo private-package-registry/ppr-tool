@@ -1,0 +1,2 @@
+# Conformance fixtures must keep their exact bytes (CRLF cases included) on every platform.
+tests/fixtures/** -text

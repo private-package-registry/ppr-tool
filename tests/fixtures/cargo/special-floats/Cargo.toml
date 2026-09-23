@@ -1,0 +1,8 @@
+[package]
+name = "demo"
+version = "1.2.3"
+
+[package.metadata]
+positive = inf
+negative = -inf
+not_a_number = nan

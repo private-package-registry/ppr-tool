@@ -1,0 +1,1 @@
+{"name":"demo","package":{"name":"demo","version":"1.2.3"},"target":{"cfg(unix)":{"dependencies":{"libc":"0.2"}},"cfg(windows)":{"dependencies":{"windows-sys":{"features":["Win32_Foundation"],"version":"0.59"}}}},"version":"1.2.3"}

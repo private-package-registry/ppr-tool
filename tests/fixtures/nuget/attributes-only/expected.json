@@ -1,0 +1,1 @@
+{"icon":"icon.png","id":"Demo.Sdk","license":{"#text":"LICENSE.txt","@_type":"file"},"name":"Demo.Sdk","repository":{"@_branch":"main","@_type":"git","@_url":"https://example.com/r.git"},"requireLicenseAcceptance":"false","serviceable":"true","version":"1.2.3"}

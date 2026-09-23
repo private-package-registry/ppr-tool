@@ -1,0 +1,1 @@
+{"error":"[SECURITY] Invalid name: \"__proto__\" is a reserved JavaScript keyword that could cause prototype pollution"}

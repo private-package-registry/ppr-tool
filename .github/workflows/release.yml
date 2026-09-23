@@ -3,26 +3,67 @@ on:
   push:
     tags: ['v*']
 permissions:
-  contents: write
+  contents: read
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - name: Committed bundles must match the source build
-        run: git diff --exit-code -- dist
-      - run: npm test
+          targets: ${{ matrix.target }}
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo test --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check the reported version and stage the asset
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/ppr-tool$EXT"
+          reported=$("$binary" --version)
+          [ "$reported" = "ppr-tool ${GITHUB_REF_NAME#v}" ] || { echo "Tag $GITHUB_REF_NAME does not match '$reported' (bump Cargo.toml)"; exit 1; }
+          mkdir -p dist
+          cp "$binary" "dist/ppr-tool-$TARGET$EXT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppr-tool-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ppr-tool-*
+          path: dist
+          merge-multiple: true
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          (cd dist && sha256sum ppr-tool.mjs > ../SHA256SUMS)
+          cd dist
+          sha256sum ppr-tool-* > SHA256SUMS
           cat SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" dist/ppr-tool.mjs SHA256SUMS --title "ppr-tool $GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" ppr-tool-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "ppr-tool $GITHUB_REF_NAME" --generate-notes

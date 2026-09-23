@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Demo.Sdk</id>
+    <version>1.2.3</version>
+    <license type="file">LICENSE.txt</license>
+    <repository type="git" url="https://example.com/r.git" branch="main" />
+    <icon>icon.png</icon>
+    <serviceable>true</serviceable>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+  </metadata>
+</package>

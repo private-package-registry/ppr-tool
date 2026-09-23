@@ -1,0 +1,4 @@
+{
+  "kind": "ok",
+  "note": "Repeated elements become arrays; a single child stays an object"
+}
