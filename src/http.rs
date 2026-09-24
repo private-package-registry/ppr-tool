@@ -206,7 +206,8 @@ impl Client {
                     if !(200..300).contains(&status) {
                         // Do not print untrusted response bodies; they could echo tokens or signed URLs.
                         let kind = if status == 401 || status == 403 { Kind::Auth } else { Kind::Registry };
-                        let mut error = Error::new(kind, format!("registry {method} {route} failed with HTTP {status}"));
+                        let mut error = Error::new(kind, format!("registry {method} {route} failed with HTTP {status}"))
+                            .detail(serde_json::json!({ "httpStatus": status }));
                         error.hint = match status {
                             401 | 403 => Some("the credential is invalid, expired or not permitted for this product".to_string()),
                             404 => Some("the product or release does not exist on this registry".to_string()),

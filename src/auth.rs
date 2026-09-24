@@ -17,6 +17,10 @@ pub struct Session {
 
 pub const REFRESH_MARGIN: i64 = 30;
 
+const OIDC_TOKEN_HINT: &str = "the registry rejected the GitHub OIDC token; check that --registry is the registry's public origin (the token audience)";
+const OIDC_TRUST_HINT: &str = "no publisher trust on the registry matches this workflow run; check the trust's repository name and owner ID \
+(renamed or transferred repositories must be updated), top-level workflow file, release tag and variants";
+
 /// Obtains a publication session for a release identity.
 pub fn authenticate(client: &Client, scope: &Scope, version: &str, ui: &Ui) -> Result<Session> {
     let github = |url: &str, bearer: &str| client.fetch_json(url, bearer, Duration::from_secs(30));
@@ -71,7 +75,13 @@ pub fn authenticate_with(
     ui.protect(value);
     let body = serde_json::to_vec(&json!({ "token": value, "product": scope.product, "version": version, "variant": scope.variant, "commit": scope.commit }))?;
     let credentials = client.request("POST", "/api/v1/auth/oidc", Body::Json(&body), &[]).map_err(|e| {
-        let hint = e.hint.clone().unwrap_or_else(|| "check that a publisher is configured for this repository and product".to_string());
+        // The generic "credential is invalid" hint would mislead: 401 rejects the GitHub token itself, 403 means no publisher trust matched.
+        let status = e.detail.as_ref().and_then(|d| d.get("httpStatus")).and_then(Value::as_u64);
+        let hint = match (status, e.hint.clone()) {
+            (Some(401), _) => OIDC_TOKEN_HINT.to_string(),
+            (Some(403), _) | (_, None) => OIDC_TRUST_HINT.to_string(),
+            (_, Some(hint)) => hint,
+        };
         e.kind(Kind::Auth).hint(hint)
     })?;
     let session = parse_session(&credentials)?;

@@ -88,7 +88,7 @@ are optional cross-checks against it.
 | 1 | Internal error |
 | 2 | Usage error: unknown flag, missing `--product`/`--variant`/`--commit`/`--registry`, or missing `-- COMMAND` |
 | 3 | Local validation failed: extension, glob, archive safety, metadata, name, version, duplicate, `private`, local dependency or size limit |
-| 4 | Authentication: no credential, or the OIDC exchange failed, or the registry returned 401/403 |
+| 4 | Authentication: no credential, or the OIDC exchange failed, or the registry returned 401/403. Registry HTTP errors add `httpStatus` under `--json` |
 | 5 | Registry or network failure after retries, unexpected status, redirect or incomplete release |
 | 6 | The verification command failed. The message includes its exit code, and `--json` adds `childExitCode` |
 | 7 | State mismatch: missing or invalid state, `--release`/`--registry` differs, artifacts changed since `stage`, or `commit` before a successful `verify` |

@@ -226,6 +226,22 @@ fn oidc_failures_are_auth_errors() {
     oidc(&f, &mut stage);
     run(&mut stage).assert_code(4);
 
+    // No matching publisher trust: point at the trust configuration, not at the credential.
+    let f = Fixture::new();
+    f.registry.fail(Failure { method: "POST", path: "/api/v1/auth/oidc", status: 403, times: usize::MAX });
+    let mut stage = f.cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    oidc(&f, &mut stage);
+    let denied = run(&mut stage);
+    denied.assert_code(4);
+    assert!(denied.stderr.contains("no publisher trust") && denied.stderr.contains("renamed or transferred"), "{}", denied.stderr);
+    assert!(!denied.stderr.contains("credential is invalid"), "{}", denied.stderr);
+
+    let f = Fixture::new();
+    f.registry.fail(Failure { method: "POST", path: "/api/v1/auth/oidc", status: 401, times: usize::MAX });
+    let mut stage = f.cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    oidc(&f, &mut stage);
+    assert!(run(&mut stage).assert_code(4).stderr.contains("token audience"));
+
     let f = Fixture::new();
     f.registry.fail(Failure { method: "GET", path: "/github/token", status: 302, times: usize::MAX });
     let mut stage = f.cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
