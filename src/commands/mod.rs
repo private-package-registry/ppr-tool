@@ -80,19 +80,6 @@ pub fn refresh_session(ctx: &Context, path: &Path, current: &mut State, client: 
     Ok(())
 }
 
-pub struct ReleaseStatus {
-    pub digest: String,
-    pub complete: bool,
-}
-
-pub fn fetch_status(client: &Client, product: &str, release_id: &str) -> Result<ReleaseStatus> {
-    let status = client.request("GET", &crate::http::route_for(product, Some(release_id)), crate::http::Body::None, &[])?;
-    Ok(ReleaseStatus {
-        digest: status.get("manifestSha256").and_then(Value::as_str).unwrap_or_default().to_string(),
-        complete: status.get("complete").and_then(Value::as_bool).unwrap_or(false),
-    })
-}
-
 /// Absolute path of the preview sidecar, so verification commands may change directory.
 pub fn preview_path(state_file: &Path) -> PathBuf {
     let file = state_file.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.join("preview.json")).unwrap_or_else(|| PathBuf::from("preview.json"));

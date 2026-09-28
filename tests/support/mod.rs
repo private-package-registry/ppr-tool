@@ -1,14 +1,15 @@
 //! Shared helpers for the integration tests: archive builders, a scratch directory, a runner for the
-//! built binary and a mock registry that implements the publication protocol.
+//! built binary and a mock registry that implements publication API v2 with a mock object store.
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -259,7 +260,7 @@ pub fn scope_args() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Mock registry
+// Mock registry (publication API v2, docs/API.md) with a mock object store under /mock-s3/
 
 #[derive(Debug, Clone)]
 pub struct Recorded {
@@ -288,22 +289,106 @@ pub struct Failure {
     pub times: usize,
 }
 
+/// A presigned upload URL issued by the mock.
+#[derive(Debug, Clone)]
+pub struct Ticket {
+    pub key: String,
+    /// Every PUT to an expired URL gets 403, like an S3 signature past its expiry.
+    pub expired: bool,
+}
+
+/// Outcome of an asynchronous verification in the mock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Ready,
+    Failed,
+    /// Ends without a verdict: the artifact goes back to `uploading` (for example a crashed worker).
+    Abandoned,
+}
+
 #[derive(Default)]
 pub struct MockState {
+    pub origin: String,
     pub requests: Vec<Recorded>,
     pub manifest: Option<Value>,
     pub digest: Option<String>,
+    /// Keys of verified (ready) artifacts.
     pub uploaded: BTreeSet<String>,
+    /// Keys whose verification failed.
+    pub failed: BTreeSet<String>,
+    /// Keys in asynchronous verification: (status polls still answered "verifying", final outcome).
+    pub verifying: BTreeMap<String, (usize, Verdict)>,
+    pub tickets: BTreeMap<String, Ticket>,
+    /// The newest uploadId per artifact key; older ones are stale.
+    pub current: BTreeMap<String, String>,
+    /// The mock bucket: stored bodies by uploadId.
+    pub objects: BTreeMap<String, Vec<u8>>,
+    pub issued: usize,
     pub committed: bool,
     pub failures: Vec<Failure>,
     pub session_expires_at: Option<String>,
     pub sessions_issued: usize,
+    /// Storage PUTs that carried a credential or cookie. Must stay empty.
+    pub leaks: Vec<String>,
+    // Injections; each counter is consumed by one request.
+    /// The next N upload URLs are born expired.
+    pub expired_urls: usize,
+    /// The next N completions answer 412 upload_missing (the stored object is discarded).
+    pub missing_uploads: usize,
+    /// The next N completions answer 202; the outcome (ready) shows after `async_polls` status polls.
+    pub async_ready: usize,
+    /// The next N completions answer 202; the outcome (failed) shows after `async_polls` status polls.
+    pub async_failed: usize,
+    pub async_polls: usize,
+    /// The next N completions answer 409 stale_upload although another process finished the artifact.
+    pub completed_elsewhere: usize,
+    /// The next N completions answer 409 stale_upload.
+    pub stale_uploads: usize,
+    /// The next N upload-url requests find the artifact being verified elsewhere (409 verifying, then ready).
+    pub verifying_elsewhere: usize,
+    /// Like `verifying_elsewhere`, but that verification ends without a verdict.
+    pub abandoned_elsewhere: usize,
+    /// The next N storage PUTs lose the connection: the mock reads the body and closes without answering.
+    pub dropped_puts: usize,
+    /// Replaces the URL in upload tickets.
+    pub ticket_url: Option<String>,
+    /// Extra headers in upload tickets.
+    pub ticket_headers: Vec<(String, String)>,
+}
+
+impl MockState {
+    fn package(&self, key: &str) -> Option<Value> {
+        self.manifest.as_ref()?["packages"].as_array()?.iter().find(|p| p["key"] == key).cloned()
+    }
+    fn keys(&self) -> Vec<String> {
+        self.manifest.as_ref().map(|m| m["packages"].as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap().to_string()).collect()).unwrap_or_default()
+    }
+    fn state_of(&self, key: &str) -> &'static str {
+        if self.uploaded.contains(key) {
+            "ready"
+        } else if self.verifying.contains_key(key) {
+            "verifying"
+        } else if self.failed.contains(key) {
+            "failed"
+        } else if self.current.contains_key(key) {
+            "uploading"
+        } else {
+            "declared"
+        }
+    }
+}
+
+fn take(counter: &mut usize) -> bool {
+    let hit = *counter > 0;
+    *counter = counter.saturating_sub(1);
+    hit
 }
 
 pub struct MockRegistry {
     pub origin: String,
     pub state: Arc<Mutex<MockState>>,
-    server: Arc<tiny_http::Server>,
+    address: std::net::SocketAddr,
+    stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -311,27 +396,43 @@ pub const STATIC_TOKEN: &str = "static-publish-token";
 pub const SESSION_TOKEN: &str = "session-token-from-oidc";
 pub const GITHUB_REQUEST_TOKEN: &str = "github-request-token";
 pub const GITHUB_OIDC_TOKEN: &str = "github-oidc-jwt";
-pub const RELEASE_ID: &str = "rel_test1";
+pub const RELEASE_ID: &str = "01k5z8e3v4x9b2c6d7f8g9h0jk";
+/// Marker in every presigned URL; it must never show up in the tool's output.
+pub const SIGNATURE: &str = "X-Amz-Signature=mock-signature";
 
 impl MockRegistry {
+    /// A thread-per-connection HTTP/1.1 server. (tiny_http's worker pool can starve a new connection
+    /// while its threads sit on idle keep-alive connections, which hung parallel uploads.)
     pub fn start() -> MockRegistry {
-        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
-        let port = server.server_addr().to_ip().unwrap().port();
-        let state = Arc::new(Mutex::new(MockState::default()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let state = Arc::new(Mutex::new(MockState { origin: origin.clone(), async_polls: 1, ..MockState::default() }));
+        let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let server = server.clone();
             let state = state.clone();
+            let stop = stop.clone();
             std::thread::spawn(move || {
-                for request in server.incoming_requests() {
-                    handle(request, &state);
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(stream) = stream else { continue };
+                    let state = state.clone();
+                    std::thread::spawn(move || serve(stream, &state));
                 }
             })
         };
-        MockRegistry { origin: format!("http://127.0.0.1:{port}"), state, server, thread: Some(thread) }
+        MockRegistry { origin, state, address, stop, thread: Some(thread) }
     }
 
     pub fn fail(&self, failure: Failure) {
         self.state.lock().unwrap().failures.push(failure);
+    }
+
+    /// Changes the mock's state (injections) under its lock.
+    pub fn with<R>(&self, change: impl FnOnce(&mut MockState) -> R) -> R {
+        change(&mut self.state.lock().unwrap())
     }
 
     pub fn requests(&self) -> Vec<Recorded> {
@@ -349,109 +450,309 @@ impl MockRegistry {
 
 impl Drop for MockRegistry {
     fn drop(&mut self) {
-        self.server.unblock();
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-fn respond(request: tiny_http::Request, status: u16, body: Value) {
-    let header = tiny_http::Header::from_bytes("content-type", "application/json").unwrap();
-    let mut response = tiny_http::Response::from_string(body.to_string()).with_status_code(status).with_header(header);
-    if (300..400).contains(&status) {
-        response.add_header(tiny_http::Header::from_bytes("location", "https://elsewhere.example.com/").unwrap());
-    }
-    let _ = request.respond(response);
+pub struct Reply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub close: bool,
+    /// Close the connection without any response.
+    pub abort: bool,
 }
 
-fn handle(mut request: tiny_http::Request, state: &Arc<Mutex<MockState>>) {
-    let mut body = Vec::new();
-    let _ = request.as_reader().read_to_end(&mut body);
-    let recorded = Recorded {
-        method: request.method().as_str().to_string(),
-        url: request.url().to_string(),
-        headers: request.headers().iter().map(|h| (h.field.as_str().as_str().to_string(), h.value.as_str().to_string())).collect(),
-        body,
-    };
+fn serve(stream: TcpStream, state: &Arc<Mutex<MockState>>) {
+    let Ok(read_half) = stream.try_clone() else { return };
+    let mut reader = BufReader::new(read_half);
+    let mut writer = stream;
+    loop {
+        let reply = match read_request(&mut reader) {
+            None => return,
+            Some(Ok(recorded)) => handle(recorded, state),
+            Some(Err(reply)) => reply,
+        };
+        if reply.abort {
+            return;
+        }
+        let mut head = format!("HTTP/1.1 {} Mock\r\n", reply.status);
+        for (name, value) in &reply.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str(&format!("content-length: {}\r\nconnection: {}\r\n\r\n", reply.body.len(), if reply.close { "close" } else { "keep-alive" }));
+        if writer.write_all(head.as_bytes()).and_then(|_| writer.write_all(&reply.body)).and_then(|_| writer.flush()).is_err() || reply.close {
+            return;
+        }
+    }
+}
+
+/// Parses one request; `None` when the client closed the connection.
+fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Result<Recorded, Reply>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let mut parts = line.trim_end().splitn(3, ' ');
+    let (method, url) = (parts.next()?.to_string(), parts.next()?.to_string());
+    let mut headers = Vec::new();
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).ok()? == 0 {
+            return None;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        let (name, value) = header.split_once(':')?;
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    let find = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+    // Object storage demands a Content-Length on presigned PUTs; the registry gets sized bodies too.
+    if find("transfer-encoding").is_some() {
+        return Some(Err(Reply { status: 411, headers: Vec::new(), body: Vec::new(), close: true, abort: false }));
+    }
+    let length = find("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).ok()?;
+    Some(Ok(Recorded { method, url, headers, body }))
+}
+
+fn respond(status: u16, body: Value) -> Reply {
+    let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+    // A cookie the tool must never send back, to registry or storage.
+    headers.push(("set-cookie".to_string(), "ppr_mock=1; Path=/".to_string()));
+    if (300..400).contains(&status) {
+        headers.push(("location".to_string(), "https://elsewhere.example.com/".to_string()));
+    }
+    Reply { status, headers, body: body.to_string().into_bytes(), close: false, abort: false }
+}
+
+fn error(status: u16, code: &str) -> Reply {
+    respond(status, json!({ "error": { "message": format!("mock {code}"), "code": code } }))
+}
+
+/// S3-style XML error from the mock object store.
+fn storage_error(status: u16, code: &str) -> Reply {
+    let body = format!("<Error><Code>{code}</Code><Message>secret-looking storage body</Message></Error>");
+    Reply { status, headers: vec![("content-type".to_string(), "application/xml".to_string())], body: body.into_bytes(), close: false, abort: false }
+}
+
+fn handle(recorded: Recorded, state: &Arc<Mutex<MockState>>) -> Reply {
     let mut state = state.lock().unwrap();
     state.requests.push(recorded.clone());
     let path = recorded.path().to_string();
     if let Some(failure) = state.failures.iter_mut().find(|f| f.method == recorded.method && path.contains(f.path) && f.times > 0) {
         failure.times = failure.times.saturating_sub(1);
-        let status = failure.status;
-        drop(state);
-        return respond(request, status, json!({ "error": "forced failure with secret-looking body" }));
+        return respond(failure.status, json!({ "error": "forced failure with secret-looking body" }));
+    }
+    if let Some(upload_id) = path.strip_prefix("/mock-s3/") {
+        return storage(&recorded, &mut state, upload_id);
     }
     let bearer = recorded.header("authorization").and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("").to_string();
     match (recorded.method.as_str(), path.as_str()) {
         ("GET", "/github/token") => {
             if bearer != GITHUB_REQUEST_TOKEN || !recorded.url.contains("audience=") {
-                return respond(request, 401, json!({}));
+                return respond(401, json!({}));
             }
-            respond(request, 200, json!({ "value": GITHUB_OIDC_TOKEN }))
+            respond(200, json!({ "value": GITHUB_OIDC_TOKEN }))
         }
-        ("POST", "/api/v1/auth/oidc") => {
+        ("POST", "/api/v2/auth/oidc") => {
             let body: Value = serde_json::from_slice(&recorded.body).unwrap_or(Value::Null);
             if body["token"] != GITHUB_OIDC_TOKEN {
-                return respond(request, 401, json!({}));
+                return respond(401, json!({}));
             }
             state.sessions_issued += 1;
-            let expires = state.session_expires_at.clone().unwrap_or_else(|| "2999-01-01T00:00:00Z".to_string());
-            respond(request, 200, json!({ "token": SESSION_TOKEN, "expiresAt": expires }))
+            let expires = state.session_expires_at.clone().unwrap_or_else(|| "2999-01-01T00:00:00.000Z".to_string());
+            respond(200, json!({ "token": SESSION_TOKEN, "expiresAt": expires }))
         }
-        _ if path.starts_with("/api/v1/products/") => {
+        _ if path.starts_with("/api/v2/products/") => {
             if bearer != STATIC_TOKEN && bearer != SESSION_TOKEN {
-                return respond(request, 401, json!({}));
+                return error(401, "unauthenticated");
             }
-            let base = "/api/v1/products/demo/releases";
-            let release = format!("{base}/{RELEASE_ID}");
-            if recorded.method == "POST" && path == base {
-                let digest = sha256_hex(&recorded.body);
-                if recorded.header("idempotency-key") != Some(digest.as_str()) || recorded.header("content-type") != Some("application/json") {
-                    return respond(request, 400, json!({}));
-                }
-                if state.digest.as_ref().is_some_and(|d| *d != digest) {
-                    return respond(request, 409, json!({}));
-                }
-                state.manifest = Some(serde_json::from_slice(&recorded.body).unwrap());
-                state.digest = Some(digest.clone());
-                let uploaded: Vec<String> = state.uploaded.iter().cloned().collect();
-                return respond(request, 200, json!({ "id": RELEASE_ID, "manifestSha256": digest, "uploaded": uploaded }));
-            }
-            if recorded.method == "PUT" && path.starts_with(&format!("{release}/artifacts/")) {
-                let key = path.rsplit('/').next().unwrap().to_string();
-                let digest = state.digest.clone().unwrap_or_default();
-                let claimed = recorded.header("x-content-sha256").unwrap_or("");
-                let length_ok = recorded.header("content-length").and_then(|v| v.parse::<usize>().ok()) == Some(recorded.body.len());
-                if claimed != sha256_hex(&recorded.body) || !length_ok || recorded.header("idempotency-key") != Some(format!("{digest}:{key}").as_str()) {
-                    return respond(request, 400, json!({}));
-                }
-                state.uploaded.insert(key);
-                return respond(request, 200, json!({}));
-            }
-            if recorded.method == "GET" && path == release {
-                let keys: Vec<String> = state
-                    .manifest
-                    .as_ref()
-                    .map(|m| m["packages"].as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap().to_string()).collect())
-                    .unwrap_or_default();
-                let complete = keys.iter().all(|k| state.uploaded.contains(k));
-                return respond(request, 200, json!({ "manifestSha256": state.digest, "complete": complete }));
-            }
-            if recorded.method == "POST" && path == format!("{release}/commit") {
-                let body: Value = serde_json::from_slice(&recorded.body).unwrap_or(Value::Null);
-                let digest = state.digest.clone().unwrap_or_default();
-                if body["manifestSha256"] != digest.as_str() || recorded.header("idempotency-key") != Some(format!("commit:{digest}").as_str()) {
-                    return respond(request, 400, json!({}));
-                }
-                state.committed = true;
-                return respond(request, 200, json!({ "published": true }));
-            }
-            respond(request, 404, json!({}))
+            publication(&recorded, &mut state, &path)
         }
-        _ => respond(request, 404, json!({})),
+        _ => respond(404, json!({})),
     }
+}
+
+fn publication(recorded: &Recorded, state: &mut MockState, path: &str) -> Reply {
+    let base = "/api/v2/products/demo/releases";
+    let release = format!("{base}/{RELEASE_ID}");
+    let digest = state.digest.clone().unwrap_or_default();
+    if recorded.method == "POST" && path == base {
+        let digest = sha256_hex(&recorded.body);
+        if recorded.header("idempotency-key") != Some(digest.as_str()) || recorded.header("content-type") != Some("application/json") {
+            return error(400, "bad_request");
+        }
+        if state.digest.as_ref().is_some_and(|d| *d != digest) {
+            return error(409, "conflict");
+        }
+        state.manifest = Some(serde_json::from_slice(&recorded.body).unwrap());
+        state.digest = Some(digest.clone());
+        let (uploaded, pending): (Vec<String>, Vec<String>) = state.keys().into_iter().partition(|k| state.uploaded.contains(k));
+        return respond(200, json!({ "id": RELEASE_ID, "manifestSha256": digest, "uploaded": uploaded, "pending": pending }));
+    }
+    if recorded.method == "GET" && path == release {
+        // Each poll brings asynchronous verifications one step closer to their outcome.
+        let settled: Vec<(String, Verdict)> = state.verifying.iter().filter(|(_, (polls, _))| *polls == 0).map(|(k, (_, v))| (k.clone(), *v)).collect();
+        for (key, verdict) in settled {
+            state.verifying.remove(&key);
+            match verdict {
+                Verdict::Ready => state.uploaded.insert(key),
+                Verdict::Failed => state.failed.insert(key),
+                Verdict::Abandoned => false,
+            };
+        }
+        let keys = state.keys();
+        let artifacts: Vec<Value> = keys
+            .iter()
+            .map(|k| match state.state_of(k) {
+                "failed" => json!({ "key": k, "state": "failed", "error": "Archive metadata differs from manifest" }),
+                other => json!({ "key": k, "state": other }),
+            })
+            .collect();
+        for entry in state.verifying.values_mut() {
+            entry.0 = entry.0.saturating_sub(1);
+        }
+        let complete = !keys.is_empty() && keys.iter().all(|k| state.uploaded.contains(k));
+        return respond(200, json!({ "manifestSha256": state.digest, "complete": complete, "artifacts": artifacts }));
+    }
+    if recorded.method == "POST" && path == format!("{release}/commit") {
+        let body: Value = serde_json::from_slice(&recorded.body).unwrap_or(Value::Null);
+        if body["manifestSha256"] != digest.as_str() || recorded.header("idempotency-key") != Some(format!("commit:{digest}").as_str()) {
+            return error(409, "manifest_mismatch");
+        }
+        if !state.keys().iter().all(|k| state.uploaded.contains(k)) {
+            return error(409, "incomplete");
+        }
+        state.committed = true;
+        return respond(200, json!({}));
+    }
+    let Some(rest) = path.strip_prefix(&format!("{release}/artifacts/")) else {
+        return error(404, "not_found");
+    };
+    let (key, action) = rest.split_once('/').unwrap_or((rest, ""));
+    if recorded.method != "POST" || state.package(key).is_none() {
+        return error(404, "not_found");
+    }
+    if recorded.header("idempotency-key") != Some(format!("{digest}:{key}").as_str()) || recorded.header("content-type") != Some("application/json") {
+        return error(400, "bad_request");
+    }
+    match action {
+        "upload-url" => issue(state, key),
+        "complete" => complete(recorded, state, key),
+        _ => error(404, "not_found"),
+    }
+}
+
+fn issue(state: &mut MockState, key: &str) -> Reply {
+    if state.uploaded.contains(key) {
+        return respond(200, json!({ "ready": true }));
+    }
+    for (counter, verdict) in [(&mut state.verifying_elsewhere, Verdict::Ready), (&mut state.abandoned_elsewhere, Verdict::Abandoned)] {
+        if take(counter) {
+            let polls = state.async_polls;
+            state.verifying.insert(key.to_string(), (polls, verdict));
+            break;
+        }
+    }
+    if state.verifying.contains_key(key) {
+        return error(409, "verifying");
+    }
+    state.issued += 1;
+    let upload_id = format!("01upload{:018}", state.issued);
+    let expired = take(&mut state.expired_urls);
+    state.tickets.insert(upload_id.clone(), Ticket { key: key.to_string(), expired });
+    state.current.insert(key.to_string(), upload_id.clone());
+    state.failed.remove(key);
+    let url = state.ticket_url.clone().unwrap_or_else(|| format!("{}/mock-s3/{upload_id}?X-Amz-Expires=1800&{SIGNATURE}", state.origin));
+    let mut headers = serde_json::Map::new();
+    headers.insert("Content-Type".into(), json!("application/octet-stream"));
+    headers.insert("x-mock-signed".into(), json!(upload_id));
+    for (name, value) in &state.ticket_headers {
+        headers.insert(name.clone(), json!(value));
+    }
+    respond(200, json!({ "ready": false, "uploadId": upload_id, "url": url, "method": "PUT", "headers": headers, "expiresAt": "2999-01-01T00:30:00.000Z" }))
+}
+
+fn complete(recorded: &Recorded, state: &mut MockState, key: &str) -> Reply {
+    let body: Value = serde_json::from_slice(&recorded.body).unwrap_or(Value::Null);
+    let Some(upload_id) = body["uploadId"].as_str().map(str::to_string) else {
+        return error(422, "invalid");
+    };
+    let current = state.current.get(key) == Some(&upload_id);
+    if state.uploaded.contains(key) && current {
+        return respond(200, json!({ "ready": true }));
+    }
+    if take(&mut state.completed_elsewhere) {
+        state.uploaded.insert(key.to_string());
+        return error(409, "stale_upload");
+    }
+    if take(&mut state.stale_uploads) || !current {
+        return error(409, "stale_upload");
+    }
+    if take(&mut state.missing_uploads) {
+        state.objects.remove(&upload_id);
+        return error(412, "upload_missing");
+    }
+    let package = state.package(key).unwrap();
+    let Some(object) = state.objects.get(&upload_id) else {
+        return error(412, "upload_missing");
+    };
+    if package["size"].as_u64() != Some(object.len() as u64) {
+        return error(412, "upload_missing");
+    }
+    if package["sha256"].as_str() != Some(sha256_hex(object).as_str()) {
+        state.failed.insert(key.to_string());
+        return error(422, "rejected");
+    }
+    for (counter, verdict) in [(&mut state.async_ready, Verdict::Ready), (&mut state.async_failed, Verdict::Failed)] {
+        if take(counter) {
+            let polls = state.async_polls;
+            state.verifying.insert(key.to_string(), (polls, verdict));
+            return respond(202, json!({ "state": "verifying" }));
+        }
+    }
+    state.uploaded.insert(key.to_string());
+    respond(200, json!({ "ready": true }))
+}
+
+/// The mock object store: presigned PUTs only, never with the registry credential.
+fn storage(recorded: &Recorded, state: &mut MockState, upload_id: &str) -> Reply {
+    if recorded.header("authorization").is_some() || recorded.header("cookie").is_some() || recorded.header("proxy-authorization").is_some() {
+        state.leaks.push(recorded.url.clone());
+        return storage_error(400, "CredentialLeak");
+    }
+    if recorded.method != "PUT" {
+        return storage_error(405, "MethodNotAllowed");
+    }
+    if take(&mut state.dropped_puts) {
+        return Reply { status: 0, headers: Vec::new(), body: Vec::new(), close: true, abort: true };
+    }
+    let Some(ticket) = state.tickets.get(upload_id).cloned() else {
+        return storage_error(404, "NoSuchUpload");
+    };
+    if ticket.expired {
+        return storage_error(403, "AccessDenied");
+    }
+    // The signed headers must arrive exactly as issued.
+    if recorded.header("x-mock-signed") != Some(upload_id)
+        || recorded.header("content-type") != Some("application/octet-stream")
+        || !recorded.url.contains(SIGNATURE)
+    {
+        return storage_error(403, "SignatureDoesNotMatch");
+    }
+    if recorded.header("content-length").and_then(|v| v.parse::<usize>().ok()) != Some(recorded.body.len()) {
+        return storage_error(400, "IncompleteBody");
+    }
+    state.objects.insert(upload_id.to_string(), recorded.body.clone());
+    Reply { status: 200, headers: vec![("etag".to_string(), format!("\"{}\"", sha256_hex(&recorded.body)))], body: Vec::new(), close: false, abort: false }
 }
 
 /// Writes one archive per format into `dir` and returns their file names.

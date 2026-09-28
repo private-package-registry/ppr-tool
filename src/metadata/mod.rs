@@ -1,6 +1,6 @@
-//! Package metadata interpretation. The registry parses the same files with JavaScript libraries
-//! (fast-xml-parser, smol-toml, JSON.parse) and compares the result with what the tool declared,
-//! so these converters must produce identical value shapes.
+//! Package metadata interpretation. The registry parses the same files (keeping the value shapes of the
+//! original JavaScript parsers: fast-xml-parser, smol-toml, JSON.parse) and compares the result with
+//! what the tool declared, so these converters must produce identical value shapes.
 
 mod cargo;
 mod json;

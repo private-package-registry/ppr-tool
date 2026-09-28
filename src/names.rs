@@ -1,9 +1,9 @@
-//! Package formats, name rules and identity helpers (mirrors registry/server/shared/manifest.ts).
+//! Package formats, name rules and identity helpers (mirrors the registry's PackageFormat rules, docs/API.md).
 
 use crate::error::{Error, Result};
 use std::fmt;
 
-/// Longest package name the registry accepts (registry/server/schemas.ts).
+/// Longest package name the registry accepts (manifest schema, docs/API.md).
 pub const MAX_NAME: usize = 214;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]

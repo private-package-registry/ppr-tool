@@ -1,6 +1,7 @@
-use super::{Context, fetch_status, open_session};
+use super::{Context, open_session};
 use crate::cli::{RegistryArgs, ReleaseArgs, StateArgs};
 use crate::error::Result;
+use crate::protocol::fetch_status;
 use crate::time;
 use serde_json::json;
 
@@ -27,6 +28,7 @@ pub fn run(ctx: &Context, state_args: &StateArgs, release: &ReleaseArgs, registr
             "digest": state_value.digest,
             "archives": state_value.archives,
             "complete": remote.complete,
+            "artifacts": remote.artifacts.iter().map(|a| json!({ "key": a.key, "state": a.state })).collect::<Vec<_>>(),
             "digestMatches": remote.digest == state_value.digest,
             "tested": state_value.tested(),
             "expiresAt": state_value.expires_at,
@@ -36,6 +38,13 @@ pub fn run(ctx: &Context, state_args: &StateArgs, release: &ReleaseArgs, registr
         return Ok(());
     }
     let ui = &ctx.ui;
+    let uploads = if remote.complete {
+        ui.green("complete")
+    } else {
+        let failed = remote.count("failed");
+        let summary = format!("incomplete: {} of {} ready", remote.count("ready"), remote.artifacts.len());
+        if failed > 0 { ui.red(&format!("{summary}, {failed} rejected")) } else { ui.yellow(&summary) }
+    };
     let rows = vec![
         vec!["Release".to_string(), state_value.release_id.clone()],
         vec!["Product".to_string(), format!("{} {} ({})", state_value.product, state_value.version, state_value.variant)],
@@ -43,7 +52,7 @@ pub fn run(ctx: &Context, state_args: &StateArgs, release: &ReleaseArgs, registr
         vec!["Registry".to_string(), state_value.registry.clone()],
         vec!["Preview".to_string(), state_value.preview.clone()],
         vec!["Archives".to_string(), state_value.archives.len().to_string()],
-        vec!["Uploads".to_string(), if remote.complete { ui.green("complete") } else { ui.yellow("incomplete") }],
+        vec!["Uploads".to_string(), uploads],
         vec![
             "Digest".to_string(),
             if remote.digest == state_value.digest { format!("{} (matches registry)", &state_value.digest[..12]) } else { ui.red("differs from registry") },

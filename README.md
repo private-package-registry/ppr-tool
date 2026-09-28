@@ -23,11 +23,14 @@ and verify it against `SHA256SUMS`:
 | Windows x64 | `ppr-tool-x86_64-pc-windows-msvc.exe` |
 
 ```sh
-curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.0.1/ppr-tool-x86_64-unknown-linux-musl
-curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v0.0.1/SHA256SUMS
+curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v1.0.0/ppr-tool-x86_64-unknown-linux-musl
+curl -fsSLO https://github.com/private-package-registry/ppr-tool/releases/download/v1.0.0/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 install -m 0755 ppr-tool-x86_64-unknown-linux-musl /usr/local/bin/ppr-tool
 ```
+
+ppr-tool 1.x speaks publication API v2 (presigned uploads) and needs a registry that implements it.
+Releases before 1.0 use the withdrawn v1 API and cannot publish to current registries.
 
 On GitHub Actions, use [setup-ppr-tool-action](https://github.com/private-package-registry/setup-ppr-tool-action).
 To build from source you need stable Rust: `cargo build --release --locked`, which produces `target/release/ppr-tool`.
@@ -51,10 +54,10 @@ ppr-tool publish --commit "$(git rev-parse HEAD)" dist/npm/*.tgz dist/nuget/*.nu
 | Command | What it does |
 |---|---|
 | `validate ARCHIVE...` | Reads the archives offline and prints the release. `--json` prints the exact manifest bytes that `stage` would send |
-| `stage ARCHIVE...` | Reserves or resumes the draft and uploads missing archives in parallel (`-j N`, default 4) |
+| `stage ARCHIVE...` | Reserves or resumes the draft and uploads missing archives in parallel (`-j N`, default 4) straight to the registry's object storage |
 | `verify -- COMMAND...` | Runs your installation test against the draft and records the result |
 | `commit` | Publishes a verified draft |
-| `status` | Shows the local state and the registry's view of the draft. It never prints the credential |
+| `status` | Shows the local state and the registry's view of the draft, including per-archive upload states. It never prints the credential |
 | `publish ARCHIVE... -- COMMAND...` | Runs `stage`, `verify` and `commit` in one process |
 
 Archives are positional arguments. `ppr-tool` expands glob patterns itself, so quoting works the same
@@ -88,14 +91,14 @@ are optional cross-checks against it.
 | 1 | Internal error |
 | 2 | Usage error: unknown flag, missing `--product`/`--variant`/`--commit`/`--registry`, or missing `-- COMMAND` |
 | 3 | Local validation failed: extension, glob, archive safety, metadata, name, version, duplicate, `private`, local dependency or size limit |
-| 4 | Authentication: no credential, or the OIDC exchange failed, or the registry returned 401/403. Registry HTTP errors add `httpStatus` under `--json` |
-| 5 | Registry or network failure after retries, unexpected status, redirect or incomplete release |
+| 4 | Authentication: no credential, or the OIDC exchange failed, or the registry returned 401/403. Registry HTTP errors add `httpStatus` (and the registry's error `code`, when it sent one) under `--json` |
+| 5 | Registry, object storage or network failure after retries, unexpected status, redirect, rejected archive or incomplete release. Object storage errors add `storageStatus` under `--json` |
 | 6 | The verification command failed. The message includes its exit code, and `--json` adds `childExitCode` |
 | 7 | State mismatch: missing or invalid state, `--release`/`--registry` differs, artifacts changed since `stage`, or `commit` before a successful `verify` |
 
 Errors print as `ppr-tool: message` with an optional `hint:` line, and name the file and field at fault,
 for example `nuget/Foo.1.2.3.nupkg: Foo.nuspec: <id> must contain text only`. Response bodies from the
-registry are never printed.
+registry and from object storage are never printed, and neither are upload URLs.
 
 ## Staging, resuming and verification
 
@@ -103,6 +106,24 @@ Running `stage` again with the same archives resumes the draft. It skips complet
 invalidates the previous local test result. A failed upload leaves the draft invisible: retry it, and
 never rebuild artifacts to resume the same draft. The server rejects any attempt to reuse a
 product/version/variant with different content.
+
+Archives do not pass through the registry (publication API v2). For each archive the registry still
+needs, `stage`:
+
+1. asks the registry for a short-lived presigned upload URL;
+2. streams the archive from disk to that URL with a plain `PUT`. This request goes to the registry's
+   object storage and never carries the registry credential or cookies. Upload URLs must be HTTPS;
+   plain HTTP is accepted only for loopback storage when the registry itself runs on a loopback
+   origin (local development);
+3. asks the registry to verify the stored object. The registry checks size, hashes, archive rules and
+   metadata before it accepts the archive.
+
+Network failures, HTTP 429 and 5xx are retried (four attempts, the storage upload on the same URL).
+If the object did not arrive (HTTP 412), or the storage refused an expired URL (HTTP 403, or by
+dropping the connection on every attempt), `stage` requests one fresh URL for that archive and uploads
+it again. When the registry verifies an archive
+asynchronously (HTTP 202), `stage` polls the draft's status every 2 seconds for up to 10 minutes.
+The machine running `ppr-tool` must be able to reach the object storage host as well as the registry.
 
 `verify` runs an explicit command, not a shell, so Windows `.cmd`/`.bat` shims need `cmd /c`. The command receives:
 
@@ -149,7 +170,8 @@ Authentication is lazy:
 3. It then exchanges that token for a short-lived publication session.
 
 Sessions refresh before verification or commit when they are within 30 seconds of expiry. If a session
-expires during upload, rerun `stage`. Never pass tokens as command arguments.
+expires during upload, rerun `stage`. Never pass tokens as command arguments. Presigned upload URLs are
+short-lived credentials too; `ppr-tool` never prints them.
 
 **The state file contains a credential.** It is written atomically with mode 0600 in a 0700 directory
 on POSIX. Keep it out of Git, caches, logs and uploaded artifacts, and delete it when you are finished.
@@ -162,7 +184,10 @@ cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo
 ```
 
 `tests/conformance.rs` compares the metadata converters with `tests/fixtures/**/expected.json`. The
-monorepo regenerates those files from the registry's own parser.
+fixtures are frozen; the monorepo writes new cases from the registry's own parser
+(`php artisan registry:metadata-fixture --write`). `tests/flow.rs` runs the binary against a mock
+registry that implements publication API v2, including a mock object store that fails the test if an
+upload ever carries a credential.
 
 ## License
 

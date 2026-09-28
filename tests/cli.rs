@@ -42,6 +42,20 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn registry_origin_rules_are_checked_before_any_request() {
+    let dir = TempDir::new();
+    dir.write("a.tgz", &npm("demo", "1.0.0"));
+    for registry in ["http://registry.example.com", "https://registry.example.com/api/v2", "https://token@registry.example.com"] {
+        let mut args = vec!["stage", "--registry", registry];
+        args.extend(scope_args());
+        args.push("a.tgz");
+        let output = run(tool(dir.path()).args(&args).env("PPR_TOKEN", STATIC_TOKEN));
+        output.assert_code(2);
+        assert!(!output.stderr.contains(STATIC_TOKEN));
+    }
+}
+
+#[test]
 fn scope_comes_from_the_environment_and_github_sha() {
     let dir = TempDir::new();
     dir.write("a.tgz", &npm("demo", "1.0.0"));

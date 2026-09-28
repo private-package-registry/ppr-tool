@@ -1,17 +1,16 @@
-use super::{Context, fetch_status, package_json, package_rows};
+use super::{Context, package_json, package_rows};
 use crate::actions;
 use crate::auth;
 use crate::cli::StageArgs;
 use crate::error::{Error, Result};
-use crate::http::{Body, Client, route_for};
+use crate::http::Client;
 use crate::inputs::{self, Scope};
-use crate::names;
+use crate::protocol;
 use crate::release::{self, Prepared};
 use crate::state::{self, State};
 use crate::time;
 use crate::upload;
-use serde_json::{Value, json};
-use std::collections::HashSet;
+use serde_json::json;
 use std::path::PathBuf;
 
 pub struct Staged {
@@ -69,16 +68,8 @@ pub fn stage(ctx: &Context, args: &StageArgs) -> Result<Staged> {
     ));
     let session = auth::authenticate(&client, &scope_value, &prepared.version, ui)?;
     client.set_token(Some(session.token.clone()));
-    let staged = client.request("POST", &route_for(&scope_value.product, None), Body::Json(&prepared.wire), &[("idempotency-key", &prepared.digest)])?;
-    let release_id = staged
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| names::is_release_id(id))
-        .ok_or_else(|| Error::registry("registry returned an invalid release identity"))?
-        .to_string();
-    if staged.get("manifestSha256").and_then(Value::as_str) != Some(prepared.digest.as_str()) {
-        return Err(Error::registry("registry returned a different release identity").hint("the registry's manifest digest does not match the local one"));
-    }
+    let staged = protocol::stage(&client, &prepared)?;
+    let release_id = staged.id.clone();
     let path = super::state_path(state_args);
     let preview = format!("{}/preview/{release_id}", client.registry);
     let state_value = State {
@@ -98,12 +89,14 @@ pub fn stage(ctx: &Context, args: &StageArgs) -> Result<Staged> {
         created_at: time::format_rfc3339(time::now()),
     };
     state::save(&path, &state_value)?;
-    let already: HashSet<String> =
-        staged.get("uploaded").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
-    let outcome = upload::upload_all(&client, &prepared, &release_id, &already, jobs.jobs as usize, ui)?;
-    let status = fetch_status(&client, &scope_value.product, &release_id)?;
-    if status.digest != prepared.digest || !status.complete {
-        return Err(Error::registry("release is incomplete after uploads").hint("rerun ppr-tool stage to resume"));
+    let outcome = upload::upload_all(&client, &prepared, &release_id, &staged.pending, jobs.jobs as usize, ui)?;
+    let status = protocol::fetch_status(&client, &scope_value.product, &release_id)?;
+    if status.digest != prepared.digest {
+        return Err(Error::registry("registry returned a different release identity").hint("the registry's manifest digest does not match the local one"));
+    }
+    if !status.complete {
+        return Err(Error::registry(format!("release is incomplete after uploads ({} of {} artifacts ready)", status.count("ready"), prepared.packages.len()))
+            .hint("rerun ppr-tool stage to resume"));
     }
     actions::set_output("release-id", &release_id)?;
     actions::set_output("preview-url", &preview)?;

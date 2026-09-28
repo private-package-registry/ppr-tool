@@ -1,9 +1,9 @@
-//! ZIP reader mirroring zipMetadata() in registry/server/archives.ts.
+//! ZIP reader mirroring the registry's ZipInspector.
 
-use super::{MAX_ARCHIVE, MAX_ENTRIES, MAX_METADATA, invalid, safe_path};
+use super::{MAX_ARCHIVE, MAX_ENTRIES, MAX_METADATA, decode_latin1, decode_name, invalid, safe_path};
 use crate::error::{Error, Result};
 use crate::names::Format;
-use std::io::Read;
+use flate2::{Decompress, FlushDecompress, Status};
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
@@ -72,7 +72,7 @@ pub fn metadata(format: Format, bytes: &[u8]) -> Result<(String, Vec<u8>)> {
         if position + 46 + nl + el + cl > central.len() {
             return Err(invalid("invalid ZIP entry size"));
         }
-        let name = String::from_utf8_lossy(&central[position + 46..position + 46 + nl]).into_owned();
+        let name = decode_name(&central[position + 46..position + 46 + nl]);
         expanded += original;
         let kind = (attrs >> 16) & 0xF000;
         if !safe_path(&name)
@@ -115,7 +115,10 @@ pub fn metadata(format: Format, bytes: &[u8]) -> Result<(String, Vec<u8>)> {
         if position + 30 + name_length > end_of_entries {
             return Err(invalid("truncated ZIP local header"));
         }
-        let name = String::from_utf8_lossy(&bytes[position + 30..position + 30 + name_length]).into_owned();
+        // Local names without the UTF-8 flag (bit 11) are Latin-1, as the server reads them, so a
+        // non-ASCII name without the flag never matches its central directory record.
+        let raw_name = &bytes[position + 30..position + 30 + name_length];
+        let name = if flags & 0x800 != 0 { decode_name(raw_name) } else { decode_latin1(raw_name) };
         let Some(entry) = by_offset.get(&(position as u64)).filter(|e| e.name == name) else {
             return Err(invalid(&format!("unexpected ZIP entry \"{name}\" (missing from the central directory)")));
         };
@@ -159,16 +162,33 @@ pub fn metadata(format: Format, bytes: &[u8]) -> Result<(String, Vec<u8>)> {
 }
 
 fn inflate(entry: &Entry, compressed: &[u8]) -> Result<Vec<u8>> {
-    let mut data = Vec::new();
+    // Output beyond the declared size is never needed: one byte more proves the mismatch.
     let limit = entry.original + 1;
+    let mut data = Vec::new();
+    let mut finished = true;
     if entry.method == 0 {
         if compressed.len() as u64 > limit {
             return Err(invalid("ZIP integrity mismatch"));
         }
         data.extend_from_slice(compressed);
-    } else {
-        let mut decoder = flate2::read::DeflateDecoder::new(compressed).take(limit);
-        decoder.read_to_end(&mut data).map_err(|_| invalid("invalid or oversized ZIP contents"))?;
+    } else if !compressed.is_empty() {
+        // Bytes after the end of the deflate stream are ignored, as the server does.
+        let mut inflater = Decompress::new(false);
+        data.reserve_exact(limit as usize);
+        finished = false;
+        loop {
+            let consumed = inflater.total_in() as usize;
+            let produced = data.len();
+            let status =
+                inflater.decompress_vec(&compressed[consumed..], &mut data, FlushDecompress::None).map_err(|_| invalid("invalid or oversized ZIP contents"))?;
+            if status == Status::StreamEnd {
+                finished = true;
+                break;
+            }
+            if data.len() as u64 >= limit || (inflater.total_in() as usize == consumed && data.len() == produced) {
+                break;
+            }
+        }
     }
     if data.len() as u64 != entry.original {
         return Err(invalid("ZIP integrity mismatch"));
@@ -177,6 +197,10 @@ fn inflate(entry: &Entry, compressed: &[u8]) -> Result<Vec<u8>> {
     crc.update(&data);
     if crc.sum() != entry.crc {
         return Err(invalid("ZIP integrity mismatch"));
+    }
+    // A deflate stream cut before its final block is invalid even when the output happens to be complete.
+    if !finished {
+        return Err(invalid("invalid or oversized ZIP contents"));
     }
     Ok(data)
 }

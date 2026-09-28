@@ -2,7 +2,7 @@
 
 use crate::actions;
 use crate::error::{Error, Kind, Result};
-use crate::http::{Body, Client};
+use crate::http::{Body, Client, OIDC_ROUTE};
 use crate::inputs::Scope;
 use crate::output::Ui;
 use crate::time;
@@ -74,7 +74,7 @@ pub fn authenticate_with(
     actions::add_mask(value);
     ui.protect(value);
     let body = serde_json::to_vec(&json!({ "token": value, "product": scope.product, "version": version, "variant": scope.variant, "commit": scope.commit }))?;
-    let credentials = client.request("POST", "/api/v1/auth/oidc", Body::Json(&body), &[]).map_err(|e| {
+    let credentials = client.request("POST", OIDC_ROUTE, Body::Json(&body), &[]).map_err(|e| {
         // The generic "credential is invalid" hint would mislead: 401 rejects the GitHub token itself, 403 means no publisher trust matched.
         let status = e.detail.as_ref().and_then(|d| d.get("httpStatus")).and_then(Value::as_u64);
         let hint = match (status, e.hint.clone()) {

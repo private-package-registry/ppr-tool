@@ -94,6 +94,14 @@ impl Error {
         self.message = format!("{location}: {}", self.message);
         self
     }
+    /// HTTP status of a failed registry request.
+    pub fn http_status(&self) -> Option<u16> {
+        self.detail.as_ref()?.get("httpStatus")?.as_u64().and_then(|s| u16::try_from(s).ok())
+    }
+    /// Machine-readable error code of a failed registry request (`error.code` in the response).
+    pub fn code(&self) -> Option<&str> {
+        self.detail.as_ref()?.get("code")?.as_str()
+    }
 }
 
 impl fmt::Display for Error {

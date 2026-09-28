@@ -1,4 +1,4 @@
-//! Archive readers must reject everything the registry rejects (registry/test/archives.test.mjs).
+//! Archive readers must reject everything the registry rejects (the same cases as the registry's archive tests).
 
 mod support;
 
@@ -137,4 +137,86 @@ fn reads_nuspec_at_the_archive_root_only() {
     assert!(rejected(Format::Nuget, &nested).contains("does not contain"));
     let two = zip(&[ZipEntry::new("Demo.nuspec", spec.as_bytes()), ZipEntry::new("Other.NUSPEC", spec.as_bytes())]);
     assert!(rejected(Format::Nuget, &two).contains("multiple"));
+}
+
+#[test]
+fn decodes_entry_names_like_the_server() {
+    let manifest = br#"{"name":"test/archive","version":"1.0.0"}"#;
+    // One leading BOM is dropped from entry names (TextDecoder), in TAR headers and ZIP names alike.
+    let tar_bom = tar_gz(&[("\u{feff}package/package.json", PACKAGE_JSON.as_bytes())]);
+    assert_eq!(metadata_file(Format::Npm, &tar_bom).unwrap().name, "package/package.json");
+    let zip_bom = zip(&[ZipEntry::new("\u{feff}composer.json", manifest)]);
+    // Without the UTF-8 flag the local name is Latin-1 and no longer matches the central directory.
+    assert!(rejected(Format::Composer, &zip_bom).contains("unexpected ZIP entry"));
+    let flagged = with_utf8_flag(zip_bom);
+    assert_eq!(metadata_file(Format::Composer, &flagged).unwrap().name, "composer.json");
+
+    // Non-ASCII names need the UTF-8 flag (bit 11).
+    let accented = zip(&[ZipEntry::new("composer.json", manifest), ZipEntry::new("src/é.php", b"<?php")]);
+    assert!(rejected(Format::Composer, &accented).contains("unexpected ZIP entry"));
+    assert!(metadata_file(Format::Composer, &with_utf8_flag(accented)).is_ok());
+}
+
+#[test]
+fn rejects_deflate_streams_without_a_final_block() {
+    let manifest = br#"{"name":"test/archive","version":"1.0.0"}"#;
+    // A sync-flushed stream carries all of the output but never reaches its final block.
+    let mut compressor = flate2::Compress::new(flate2::Compression::default(), false);
+    let mut unfinished = Vec::with_capacity(1024);
+    compressor.compress_vec(manifest, &mut unfinished, flate2::FlushCompress::Sync).unwrap();
+    let archive = zip_raw_deflate("composer.json", manifest, &unfinished);
+    let message = rejected(Format::Composer, &archive);
+    assert!(message.contains("invalid or oversized ZIP contents"), "{message}");
+
+    let mut finished = Vec::with_capacity(1024);
+    flate2::Compress::new(flate2::Compression::default(), false).compress_vec(manifest, &mut finished, flate2::FlushCompress::Finish).unwrap();
+    assert!(metadata_file(Format::Composer, &zip_raw_deflate("composer.json", manifest, &finished)).is_ok());
+}
+
+/// Sets general-purpose bit 11 (UTF-8 names) in every local and central header.
+fn with_utf8_flag(mut bytes: Vec<u8>) -> Vec<u8> {
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        match bytes[i..i + 4] {
+            [0x50, 0x4b, 0x03, 0x04] => bytes[i + 7] |= 0x08,
+            [0x50, 0x4b, 0x01, 0x02] => bytes[i + 9] |= 0x08,
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes
+}
+
+/// A one-entry deflate ZIP whose compressed payload is given verbatim.
+fn zip_raw_deflate(name: &str, data: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(data);
+    let mut header = Vec::new();
+    header.extend_from_slice(&20u16.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    header.extend_from_slice(&8u16.to_le_bytes());
+    header.extend_from_slice(&[0, 0, 0x21, 0]);
+    header.extend_from_slice(&crc.sum().to_le_bytes());
+    header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    header.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    let mut out = 0x0403_4b50u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&header);
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(payload);
+    let directory_offset = out.len() as u32;
+    let mut central = 0x0201_4b50u32.to_le_bytes().to_vec();
+    central.extend_from_slice(&20u16.to_le_bytes());
+    central.extend_from_slice(&header);
+    central.extend_from_slice(&[0; 10]); // comment length, disk, internal and external attributes
+    central.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+    central.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0]);
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&directory_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
 }

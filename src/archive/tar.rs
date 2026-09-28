@@ -1,11 +1,11 @@
-//! ustar reader over gzip, mirroring tarMetadata() in registry/server/archives.ts.
+//! ustar reader over gzip, mirroring the registry's TarInspector.
 
-use super::{MAX_ARCHIVE, MAX_ENTRIES, MAX_METADATA, invalid, safe_path};
+use super::{MAX_ARCHIVE, MAX_ENTRIES, MAX_METADATA, decode_name, invalid, safe_path};
 use crate::error::{Error, Result};
 use crate::names::Format;
 use std::io::Read;
 
-/// Single-member gzip only: DecompressionStream on the server rejects trailing or concatenated data.
+/// Single-member gzip only: the registry rejects trailing or concatenated gzip members.
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = flate2::bufread::GzDecoder::new(bytes);
     let mut out = Vec::new();
@@ -26,16 +26,28 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decodes like TextDecoder (lossy) and cuts at the first NUL, as the server does.
+/// Cuts at the first NUL and decodes like TextDecoder (lossy, one BOM dropped), as the server does.
 fn field(header: &[u8], start: usize, length: usize) -> Result<String> {
     let raw = &header[start..start + length];
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    Ok(String::from_utf8_lossy(&raw[..end]).into_owned())
+    Ok(decode_name(&raw[..end]))
+}
+
+/// ECMAScript String.prototype.trim() whitespace (the server trims numbers like JavaScript did):
+/// unlike Rust's trim(), it includes U+FEFF and excludes U+0085.
+fn js_trim(value: &str) -> &str {
+    value.trim_matches(|c: char| {
+        matches!(
+            c,
+            '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+        )
+    })
 }
 
 fn octal(header: &[u8], start: usize, length: usize) -> Result<u64> {
     let text = field(header, start, length)?;
-    let value = text.trim();
+    let value = js_trim(&text);
     if value.is_empty() || !value.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
         return Err(invalid("invalid TAR number"));
     }

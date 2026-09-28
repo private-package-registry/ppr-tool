@@ -12,6 +12,7 @@ pub mod inputs;
 pub mod metadata;
 pub mod names;
 pub mod output;
+pub mod protocol;
 pub mod release;
 pub mod state;
 pub mod time;

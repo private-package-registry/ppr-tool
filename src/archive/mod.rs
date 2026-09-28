@@ -1,4 +1,4 @@
-//! Archive readers that mirror the registry's server-side rules (registry/server/archives.ts),
+//! Archive readers that mirror the registry's server-side rules (registry/app/Publication/Archives),
 //! so a package rejected by the server is rejected locally with a readable message.
 
 mod tar;
@@ -34,6 +34,19 @@ pub fn metadata_file(format: Format, bytes: &[u8]) -> Result<MetadataFile> {
     let (name, raw) = if format.is_zip() { zip::metadata(format, bytes)? } else { tar::metadata(format, bytes)? };
     let text = std::str::from_utf8(&raw).map_err(|_| Error::validation(format!("{name} is not valid UTF-8")))?;
     Ok(MetadataFile { text: text.strip_prefix('\u{feff}').unwrap_or(text).to_string(), name })
+}
+
+/// Entry names are decoded like the registry's TextDecoder (the WHATWG decoder the v1 server used):
+/// invalid UTF-8 becomes U+FFFD and one leading byte order mark is dropped, so a name such as
+/// BOM + `composer.json` is the metadata file on both sides.
+pub(crate) fn decode_name(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
+}
+
+/// ISO-8859-1: how the registry (like fflate before it) reads ZIP local names without the UTF-8 flag.
+pub(crate) fn decode_latin1(raw: &[u8]) -> String {
+    raw.iter().map(|&b| b as char).collect()
 }
 
 pub(crate) fn invalid(what: &str) -> Error {
