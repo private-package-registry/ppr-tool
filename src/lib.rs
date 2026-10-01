@@ -23,6 +23,10 @@ use cli::{Cli, Command};
 use commands::Context;
 use error::{Error, Kind};
 
+/// Stack of the thread the CLI runs on: enough for metadata at the registry's nesting limits on every
+/// platform, whatever the main thread was given.
+pub const WORK_STACK: usize = 64 * 1024 * 1024;
+
 /// Runs the CLI and returns the process exit code.
 pub fn run<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     let cli = match Cli::try_parse_from(args) {

@@ -53,6 +53,11 @@ fn sanitize_name(name: &str) -> Result<String> {
     }
 }
 
+/// Open elements allowed at once, <package> included: the registry's NuspecParser::MAX_DEPTH. A deeper
+/// nuspec would pass here and fail the server's verification after the upload; the bound also keeps the
+/// recursive convert() far from the end of the stack.
+const MAX_DEPTH: usize = 1024;
+
 fn read_tree(text: &str) -> Result<Node> {
     let mut reader = Reader::from_str(text);
     let config = reader.config_mut();
@@ -107,6 +112,10 @@ fn read_tree(text: &str) -> Result<Node> {
                     let attribute = attribute.map_err(|e| err(format!("attribute error: {e}")))?;
                     let key = attribute.key.as_ref().to_string();
                     attributes.push((key, decode(js_trim(&attribute.value)).to_string()));
+                }
+                // The stack also holds the synthetic document node, as the registry's does.
+                if stack.len() > MAX_DEPTH {
+                    return Err(err("elements are nested too deeply"));
                 }
                 stack.push(Node { name, attributes, children: Vec::new() });
                 if is_empty {
@@ -263,5 +272,26 @@ mod tests {
         assert!(parse("<package><metadata><id>a</id><version>1</version><p><?pi?>t</p></metadata></package>").is_err());
         assert!(parse("<package><metadata><id>a</id><version>1</version><__proto__>x</__proto__></metadata></package>").is_err());
         assert!(parse("<package><metadata><id>a</id><version>1</version><d a=\"1\" a=\"2\"/></metadata></package>").is_err());
+    }
+
+    fn nested(levels: usize) -> Result<Value> {
+        parse(&format!("<package><metadata><id>a</id><version>1</version>{}{}</metadata></package>", "<n>".repeat(levels), "</n>".repeat(levels)))
+    }
+
+    #[test]
+    fn limits_nesting_like_the_registry() {
+        // The deepest accepted document needs the stack the binary runs on, not a test thread's 2 MiB.
+        let check = || {
+            // <package> and <metadata> take two of the 1024 levels.
+            assert!(nested(MAX_DEPTH - 2).is_ok());
+            assert_eq!(nested(MAX_DEPTH - 1).unwrap_err().message, "invalid nuspec: elements are nested too deeply");
+            // Far beyond the limit the answer is still an error, not a stack overflow; self-closing elements count too.
+            assert_eq!(nested(200_000).unwrap_err().message, "invalid nuspec: elements are nested too deeply");
+            let levels = MAX_DEPTH - 2;
+            let self_closing =
+                format!("<package><metadata><id>a</id><version>1</version>{}<n/>{}</metadata></package>", "<n>".repeat(levels), "</n>".repeat(levels));
+            assert!(parse(&self_closing).is_err());
+        };
+        std::thread::Builder::new().stack_size(crate::WORK_STACK).spawn(check).unwrap().join().unwrap();
     }
 }

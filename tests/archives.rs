@@ -173,6 +173,84 @@ fn rejects_deflate_streams_without_a_final_block() {
     assert!(metadata_file(Format::Composer, &zip_raw_deflate("composer.json", manifest, &finished)).is_ok());
 }
 
+/// Deflate bit stream writer: header and extra bits go in LSB first, Huffman codes MSB first.
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    used: u32,
+}
+
+impl Bits {
+    fn bit(&mut self, bit: u32) {
+        if self.used.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        *self.bytes.last_mut().unwrap() |= (bit as u8 & 1) << (self.used % 8);
+        self.used += 1;
+    }
+    fn raw(&mut self, value: u32, count: u32) {
+        (0..count).for_each(|i| self.bit(value >> i));
+    }
+    fn code(&mut self, code: u32, length: u32) {
+        (0..length).rev().for_each(|i| self.bit(code >> i));
+    }
+    /// A fixed-Huffman block: the literals, then a match of length 3 at the given distance code (with its
+    /// extra bits all zero), then end-of-block.
+    fn fixed_block(&mut self, last: bool, literals: &[u8], distance_code: u32, extra_bits: u32) {
+        self.raw(last as u32, 1);
+        self.raw(1, 2);
+        for &literal in literals {
+            assert!(literal < 144, "8-bit fixed codes only");
+            self.code(0x30 + literal as u32, 8);
+        }
+        self.code(1, 7);
+        self.code(distance_code, 5);
+        self.raw(0, extra_bits);
+        self.code(0, 7);
+    }
+    fn stored_block(&mut self, last: bool, data: &[u8]) {
+        self.raw(last as u32, 1);
+        self.raw(0, 2);
+        self.used = self.bytes.len() as u32 * 8;
+        self.bytes.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        self.bytes.extend_from_slice(&(!(data.len() as u16)).to_le_bytes());
+        self.bytes.extend_from_slice(data);
+        self.used = self.bytes.len() as u32 * 8;
+    }
+}
+
+#[test]
+fn rejects_matches_that_reach_before_the_start_of_the_output() {
+    // zlib (the registry) fails with "invalid distance too far back"; a decoder that starts from a zeroed
+    // window reads zeros instead, and the CRC below is the one of that lenient reading.
+    let mut far = Bits::default();
+    far.fixed_block(true, b"ab", 20, 9); // distance 1025 after two bytes of output
+    let lenient = b"ab\0\0\0";
+    let message = rejected(Format::Composer, &zip_raw_deflate("composer.json", lenient, &far.bytes));
+    assert!(message.contains("invalid or oversized ZIP contents"), "{message}");
+
+    // The same stream with a distance inside the output is fine.
+    let mut near = Bits::default();
+    near.fixed_block(true, b"{}", 0, 0); // distance 1: "{}}}}"
+    assert!(metadata_file(Format::Composer, &zip_raw_deflate("composer.json", b"{}}}}", &near.bytes)).is_ok());
+
+    // npm tarball: the far match fills three zero bytes of the first header's name padding.
+    let tar = tar(&[("package/package.json", PACKAGE_JSON.as_bytes(), b'0')]);
+    assert!(tar[20..23] == [0, 0, 0]);
+    let mut stream = Bits::default();
+    stream.fixed_block(false, &tar[..20], 20, 9);
+    stream.stored_block(true, &tar[23..]);
+    let mut crc = flate2::Crc::new();
+    crc.update(&tar);
+    let mut member = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    member.extend_from_slice(&stream.bytes);
+    member.extend_from_slice(&crc.sum().to_le_bytes());
+    member.extend_from_slice(&(tar.len() as u32).to_le_bytes());
+    let message = rejected(Format::Npm, &member);
+    assert!(message.contains("invalid GZIP data"), "{message}");
+    assert!(metadata_file(Format::Npm, &gzip(&tar)).is_ok());
+}
+
 /// Sets general-purpose bit 11 (UTF-8 names) in every local and central header.
 fn with_utf8_flag(mut bytes: Vec<u8>) -> Vec<u8> {
     let mut i = 0;

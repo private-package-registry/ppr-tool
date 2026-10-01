@@ -21,7 +21,9 @@ anstream = "1"
 anstyle = "1"
 base64 = "0.23"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
-flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# zlib-rs inflates exactly like the registry's zlib; miniz_oxide (rust_backend) accepts streams zlib refuses,
+# e.g. a match that reaches before the start of the output.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 glob = "0.3"
 indicatif = "0.18"
 quick-xml = "0.42"

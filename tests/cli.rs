@@ -211,3 +211,29 @@ fn github_annotations_go_to_stderr() {
     assert!(output.stderr.contains("::error title=ppr-tool::"));
     output.json();
 }
+
+/// A .nupkg whose nuspec nests `levels` elements below <metadata>.
+fn nested_nupkg(levels: usize) -> Vec<u8> {
+    let spec = format!(
+        "<package><metadata><id>Demo.Sdk</id><version>1.2.3</version><authors>Tests</authors>{}{}</metadata></package>",
+        "<a>".repeat(levels),
+        "</a>".repeat(levels)
+    );
+    zip(&[ZipEntry::new("Demo.Sdk.nuspec", spec.as_bytes())])
+}
+
+#[test]
+fn nuspec_nesting_is_limited_like_the_registry() {
+    let dir = TempDir::new();
+    // 1024 open elements with <package> and <metadata>: the registry's limit, validated without exhausting the stack.
+    dir.write("limit.nupkg", &nested_nupkg(1022));
+    validate(&dir, &["limit.nupkg"]).assert_code(0);
+    // One level more is refused by the registry after the upload, so it is refused here; a nuspec near the
+    // 256 KiB metadata limit used to abort the process with a stack overflow instead.
+    for (name, levels) in [("deep.nupkg", 1023), ("deeper.nupkg", 36_000)] {
+        dir.write(name, &nested_nupkg(levels));
+        let output = validate(&dir, &[name]);
+        assert_ne!(output.code, 0, "{name} must be rejected");
+        assert!(output.stderr.contains("elements are nested too deeply"), "{name}: exit {}\n{}", output.code, output.stderr);
+    }
+}

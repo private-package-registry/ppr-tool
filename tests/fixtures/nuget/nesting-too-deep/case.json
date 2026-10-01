@@ -1,0 +1,4 @@
+{
+  "kind": "server-error",
+  "note": "more than 1024 open elements are rejected by the registry and the tool alike"
+}
