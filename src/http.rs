@@ -57,7 +57,11 @@ pub fn registry_url(value: &str) -> Result<String> {
 
 fn is_loopback(url: &url::Url) -> bool {
     match url.host() {
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        // RFC 6761: "localhost" and every name under it are loopback (the local stack signs URLs for s3.localhost).
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.strip_suffix('.').unwrap_or(domain).to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
@@ -495,6 +499,11 @@ mod tests {
         assert!(allowed("http://127.0.0.1:9000/bucket/uploads/a", true));
         assert!(allowed("http://localhost:9000/bucket/uploads/a", true));
         assert!(allowed("http://[::1]:9000/bucket/uploads/a", true));
+        assert!(allowed("http://s3.localhost:9000/bucket/uploads/a", true));
+        assert!(allowed("http://S3.LocalHost.:9000/bucket/uploads/a", true));
+        assert!(!allowed("http://s3.localhost:9000/bucket/uploads/a", false), "plain HTTP needs the loopback allowance");
+        assert!(!allowed("http://s3.localhost.example.com/bucket/uploads/a", true));
+        assert!(!allowed("http://notlocalhost/bucket/uploads/a", true));
         assert!(!allowed("http://127.0.0.1:9000/bucket/uploads/a", false), "plain HTTP needs the loopback allowance");
         assert!(!allowed("http://storage.example.com/bucket/uploads/a", true), "plain HTTP only on loopback");
         assert!(!allowed("http://10.0.0.1/bucket/uploads/a", true));
